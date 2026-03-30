@@ -1,0 +1,415 @@
+/*
+ * Smart Focus Dock - Proposed Final Implementation
+ * Target MCU: STM32
+ *
+ * Note:
+ * This code represents a proposed real-hardware implementation of the Smart
+ * Focus Dock using an STM32 microcontroller. It was not tested on physical
+ * hardware, but it reflects the intended architecture for the final product.
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+
+/* Replace with actual STM32 HAL headers in implementation */
+// #include "stm32l4xx_hal.h"
+
+//Hardware Pin Definitions
+
+// Example symbolic definitions only
+#define PHONE_SENSOR_PIN     0
+#define BTN_ADD_HOUR_PIN     1
+#define BTN_ADD_30MIN_PIN    2
+#define STATUS_LED_PIN       3
+
+//Constants
+
+#define SECONDS_PER_HOUR     3600U
+#define SECONDS_PER_30MIN    1800U
+#define MAX_SESSION_TIME     14400U   // 4 hours max
+#define DISPLAY_BUFFER_SIZE  64
+
+//State Machine
+
+typedef enum
+{
+    STATE_IDLE = 0,
+    STATE_TIMER_SETUP,
+    STATE_ACTIVE,
+    STATE_COMPLETE,
+    STATE_INTERRUPTED
+} SystemState;
+
+//Global Variables
+
+volatile SystemState currentState = STATE_IDLE;
+
+volatile uint32_t selectedTimeSeconds = 0;
+volatile uint32_t remainingTimeSeconds = 0;
+
+volatile bool phonePresent = false;
+volatile bool sessionRunning = false;
+volatile bool displayUpdateRequired = true;
+volatile bool oneSecondTick = false;
+
+//Function Prototypes
+
+void System_Init(void);
+void GPIO_Init(void);
+void Timer_Init(void);
+void OLED_Init(void);
+
+void OLED_Clear(void);
+void OLED_PrintLine(uint8_t line, const char *text);
+void OLED_ShowIdleScreen(void);
+void OLED_ShowSetupScreen(uint32_t timeSeconds);
+void OLED_ShowActiveScreen(uint32_t remainingSeconds);
+void OLED_ShowCompleteScreen(void);
+void OLED_ShowInterruptedScreen(void);
+
+void EnterState(SystemState newState);
+void Handle_IdleState(void);
+void Handle_SetupState(void);
+void Handle_ActiveState(void);
+void Handle_CompleteState(void);
+void Handle_InterruptedState(void);
+
+void StartSession(void);
+void StopSession(void);
+void ResetSession(void);
+
+void UpdateDisplay(void);
+void FormatTime(uint32_t totalSeconds, char *buffer, size_t len);
+
+//Main
+
+int main(void)
+{
+    System_Init();
+    EnterState(STATE_IDLE);
+
+    while (1)
+    {
+        if (oneSecondTick)
+        {
+            oneSecondTick = false;
+
+            if (currentState == STATE_ACTIVE && sessionRunning)
+            {
+                if (remainingTimeSeconds > 0)
+                {
+                    remainingTimeSeconds--;
+                    displayUpdateRequired = true;
+                }
+
+                if (remainingTimeSeconds == 0)
+                {
+                    sessionRunning = false;
+                    EnterState(STATE_COMPLETE);
+                }
+            }
+        }
+
+        switch (currentState)
+        {
+            case STATE_IDLE:
+                Handle_IdleState();
+                break;
+
+            case STATE_TIMER_SETUP:
+                Handle_SetupState();
+                break;
+
+            case STATE_ACTIVE:
+                Handle_ActiveState();
+                break;
+
+            case STATE_COMPLETE:
+                Handle_CompleteState();
+                break;
+
+            case STATE_INTERRUPTED:
+                Handle_InterruptedState();
+                break;
+
+            default:
+                EnterState(STATE_IDLE);
+                break;
+        }
+
+        if (displayUpdateRequired)
+        {
+            UpdateDisplay();
+            displayUpdateRequired = false;
+        }
+    }
+}
+
+//Initialization
+
+void System_Init(void)
+{
+    // HAL_Init();
+    // SystemClock_Config();
+
+    GPIO_Init();
+    Timer_Init();
+    OLED_Init();
+
+    OLED_Clear();
+}
+
+void GPIO_Init(void)
+{
+    /* Configure:
+       - phone sensor as external interrupt input
+       - hour button as external interrupt input
+       - 30 min button as external interrupt input
+       - status LED as output
+    */
+}
+
+void Timer_Init(void)
+{
+    /* Configure hardware timer to generate interrupt every 1 second */
+}
+
+void OLED_Init(void)
+{
+    /* Initialize OLED over I2C */
+}
+
+//State Entry
+
+void EnterState(SystemState newState)
+{
+    currentState = newState;
+    displayUpdateRequired = true;
+
+    switch (newState)
+    {
+        case STATE_IDLE:
+            ResetSession();
+            break;
+
+        case STATE_TIMER_SETUP:
+            break;
+
+        case STATE_ACTIVE:
+            StartSession();
+            break;
+
+        case STATE_COMPLETE:
+            StopSession();
+            break;
+
+        case STATE_INTERRUPTED:
+            StopSession();
+            break;
+
+        default:
+            break;
+    }
+}
+
+//State Handlers
+
+void Handle_IdleState(void)
+{
+    /* Wait for user to begin selecting a session duration */
+    if (selectedTimeSeconds == 0)
+    {
+        return;
+    }
+
+    EnterState(STATE_TIMER_SETUP);
+}
+
+void Handle_SetupState(void)
+{
+    /* Once a valid time is set, session begins when phone is placed */
+    if (selectedTimeSeconds > 0 && phonePresent)
+    {
+        EnterState(STATE_ACTIVE);
+    }
+}
+
+void Handle_ActiveState(void)
+{
+    /* If phone is removed early, interrupt session */
+    if (!phonePresent && sessionRunning)
+    {
+        EnterState(STATE_INTERRUPTED);
+    }
+}
+
+void Handle_CompleteState(void)
+{
+    /* In real implementation, could wait for user acknowledgement
+       or automatically return to idle after a timeout */
+}
+
+void Handle_InterruptedState(void)
+{
+    /* In real implementation, could flash LED/buzzer briefly
+       before returning to idle */
+}
+
+//Session Control
+
+void StartSession(void)
+{
+    remainingTimeSeconds = selectedTimeSeconds;
+    sessionRunning = true;
+}
+
+void StopSession(void)
+{
+    sessionRunning = false;
+}
+
+void ResetSession(void)
+{
+    selectedTimeSeconds = 0;
+    remainingTimeSeconds = 0;
+    sessionRunning = false;
+    phonePresent = false;
+}
+
+//Display Logic
+
+void UpdateDisplay(void)
+{
+    switch (currentState)
+    {
+        case STATE_IDLE:
+            OLED_ShowIdleScreen();
+            break;
+
+        case STATE_TIMER_SETUP:
+            OLED_ShowSetupScreen(selectedTimeSeconds);
+            break;
+
+        case STATE_ACTIVE:
+            OLED_ShowActiveScreen(remainingTimeSeconds);
+            break;
+
+        case STATE_COMPLETE:
+            OLED_ShowCompleteScreen();
+            break;
+
+        case STATE_INTERRUPTED:
+            OLED_ShowInterruptedScreen();
+            break;
+
+        default:
+            OLED_ShowIdleScreen();
+            break;
+    }
+}
+
+void OLED_ShowIdleScreen(void)
+{
+    OLED_Clear();
+    OLED_PrintLine(0, "Smart Focus Dock");
+    OLED_PrintLine(1, "Select time");
+}
+
+void OLED_ShowSetupScreen(uint32_t timeSeconds)
+{
+    char timeBuffer[DISPLAY_BUFFER_SIZE];
+
+    OLED_Clear();
+    OLED_PrintLine(0, "Set Session Time");
+    FormatTime(timeSeconds, timeBuffer, sizeof(timeBuffer));
+    OLED_PrintLine(1, timeBuffer);
+}
+
+void OLED_ShowActiveScreen(uint32_t remainingSeconds)
+{
+    char timeBuffer[DISPLAY_BUFFER_SIZE];
+
+    OLED_Clear();
+    OLED_PrintLine(0, "Focus Active");
+    FormatTime(remainingSeconds, timeBuffer, sizeof(timeBuffer));
+    OLED_PrintLine(1, timeBuffer);
+}
+
+void OLED_ShowCompleteScreen(void)
+{
+    OLED_Clear();
+    OLED_PrintLine(0, "Session Complete");
+    OLED_PrintLine(1, "Good work");
+}
+
+void OLED_ShowInterruptedScreen(void)
+{
+    OLED_Clear();
+    OLED_PrintLine(0, "Session Interrupted");
+    OLED_PrintLine(1, "Phone removed");
+}
+
+void OLED_Clear(void)
+{
+    /* OLED clear command */
+}
+
+void OLED_PrintLine(uint8_t line, const char *text)
+{
+    /* OLED text rendering function */
+}
+
+void FormatTime(uint32_t totalSeconds, char *buffer, size_t len)
+{
+    uint32_t hours = totalSeconds / 3600U;
+    uint32_t minutes = (totalSeconds % 3600U) / 60U;
+    uint32_t seconds = totalSeconds % 60U;
+
+    snprintf(buffer, len, "%02lu:%02lu:%02lu",
+             (unsigned long)hours,
+             (unsigned long)minutes,
+             (unsigned long)seconds);
+}
+
+//Interrupt Handlers / Callbacks
+
+
+/* This would be called by the timer ISR every 1 second */
+void Timer_OneSecondCallback(void)
+{
+    oneSecondTick = true;
+}
+
+/* This would be called from GPIO EXTI callback */
+void GPIO_InputCallback(uint16_t pin, bool pinState)
+{
+    if (pin == PHONE_SENSOR_PIN)
+    {
+        phonePresent = pinState;
+        displayUpdateRequired = true;
+    }
+    else if (pin == BTN_ADD_HOUR_PIN)
+    {
+        if (currentState == STATE_IDLE || currentState == STATE_TIMER_SETUP)
+        {
+            if (selectedTimeSeconds + SECONDS_PER_HOUR <= MAX_SESSION_TIME)
+            {
+                selectedTimeSeconds += SECONDS_PER_HOUR;
+                displayUpdateRequired = true;
+            }
+        }
+    }
+    else if (pin == BTN_ADD_30MIN_PIN)
+    {
+        if (currentState == STATE_IDLE || currentState == STATE_TIMER_SETUP)
+        {
+            if (selectedTimeSeconds + SECONDS_PER_30MIN <= MAX_SESSION_TIME)
+            {
+                selectedTimeSeconds += SECONDS_PER_30MIN;
+                displayUpdateRequired = true;
+            }
+        }
+    }
+}
