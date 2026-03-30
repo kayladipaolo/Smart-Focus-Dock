@@ -1,0 +1,273 @@
+//includes standard integer definitions used in embedded programming.
+#include <stdint.h>
+
+/*
+    Smart Focus Dock - DE1-SoC / DE10-style CPUlator prototype
+    -----------------------------------------------------------
+    SW0 = 1 = phone present
+	SW0 = 0 = phone removed
+    SW1 = reset
+
+    HEX1 = state
+      blank = idle
+      P     = focus active
+      C     = complete
+      E     = interrupted
+
+    HEX0 = progress step
+      1,2,3,4 during active session
+
+    Designed for CPUlator ARMv7 C
+*/
+
+#define SW_BASE         0xFF200040
+#define HEX3_HEX0_BASE  0xFF200020
+
+//pointer to the switch hardware register 
+volatile int * const SW_PTR  = (int *)SW_BASE;
+//pointer to 7 segment display register 
+volatile int * const HEX_PTR = (int *)HEX3_HEX0_BASE;
+
+/* 7-segment bit patterns */
+#define SEG_0      0x3F
+#define SEG_1      0x06
+#define SEG_2      0x5B
+#define SEG_3      0x4F
+#define SEG_4      0x66
+#define SEG_C      0x39
+#define SEG_E      0x79
+#define SEG_P      0x73
+#define SEG_BLANK  0x00
+
+//this creates a custom type called State 
+//used enum to represent the four system states 
+typedef enum {
+    IDLE = 0,
+    ACTIVE,
+    COMPLETE,
+    INTERRUPTED
+} State;
+
+/* ---------- basic helpers ---------- */
+
+//this just returns the full switch register value 
+int read_switches(void) {
+    return *SW_PTR;
+}
+
+//this writes to hex0 and hex1, hex0 is the lowest byte and then hex1
+//is shifted by 8 bits so its in the next byte, | combines them together
+//the function packs the two 7-segment values into one register write
+//so hex0 and hex1 update together 
+void write_hex0_hex1(unsigned char hex0, unsigned char hex1) {
+    /* HEX0 is lowest byte, HEX1 is next byte */
+    *HEX_PTR = ((int)hex1 << 8) | hex0;
+}
+
+//i used a software delay loop so you can see the physical changes in
+//states when demoing, it just counts down in a loop 
+void delay(volatile int count) {
+    while (count > 0) {
+        count--;
+    }
+}
+
+/* ---------- display helpers ---------- */
+
+//sets both displays to blank
+void show_idle(void) {
+    write_hex0_hex1(SEG_BLANK, SEG_BLANK);
+}
+
+//this shows progress during the active session
+//hex1 will always be set to P while hex0 changes 
+void show_active_progress(int step) {
+    unsigned char hex0 = SEG_BLANK;
+
+    if (step <= 1) hex0 = SEG_1;
+    else if (step == 2) hex0 = SEG_2;
+    else if (step == 3) hex0 = SEG_3;
+    else hex0 = SEG_4;
+
+    write_hex0_hex1(hex0, SEG_P);
+}
+
+//this displays C4 when the active state ends 
+void show_complete(void) {
+    write_hex0_hex1(SEG_4, SEG_C);
+}
+
+//shows E0 if the cycle is interrupted 
+void show_interrupted(void) {
+    write_hex0_hex1(SEG_0, SEG_E);
+}
+
+//this is the flashing completed message
+void flash_complete(void) {
+    int i;
+    for (i = 0; i < 6; i++) {
+
+        if (read_switches() & 0x2) return;   // reset check
+
+        show_complete();
+        delay(300000);
+
+        if (read_switches() & 0x2) return;   // reset check
+
+        write_hex0_hex1(SEG_BLANK, SEG_BLANK);
+        delay(300000);
+    }
+}
+//this is the flashing interrupted message
+void flash_interrupted(void) {
+    int i;
+    for (i = 0; i < 6; i++) {
+
+        if (read_switches() & 0x2) return;  // ← RESET CHECK
+
+        show_interrupted();
+        delay(300000);
+
+        if (read_switches() & 0x2) return;  // ← RESET CHECK
+
+        write_hex0_hex1(SEG_BLANK, SEG_BLANK);
+        delay(300000);
+    }
+}
+/* ---------- main ---------- */
+
+int main(void) {
+	
+	//program starts in idle state 
+    State state = IDLE;
+
+    /* One full focus session = 4 visible steps */
+    const int STEP_COUNT = 4;
+
+    /*
+       how long the program waits between steps 
+    */
+    const int STEP_DELAY = 15000000;
+	
+	//tracks progress through the session
+    int progress_step = 0;
+	//stores current switch value 
+    int sw;
+	
+	//start with blank display 
+    show_idle();
+	
+	//infinite loop begins 
+    while (1) {
+		
+		//read current switch states and store them in sw
+        sw = read_switches();
+
+        /* SW1 = reset anytime */
+		//this checks if sw1 is on (sw1 is 0x2)
+		//if yes go back to idle, reset progress, blank display, skip
+		//to next loop iteration
+        if (sw & 0x2) {
+            state = IDLE;
+            progress_step = 0;
+            show_idle();
+            continue;
+        }
+
+        switch (state) {
+            case IDLE:
+				
+				//display stays blank
+                show_idle();
+				
+				//in idle the system waits for sw0 to go high which 
+				//represents the phone being placed on the dock 
+                /* Start when SW0 goes high */
+				//this checks if sw0 is on (sw0 is 0x1)
+                if (sw & 0x1) {
+					//is sw0=1 session starts, set progress to 1,
+					//show p1, move to active 
+                    progress_step = 1;
+                    show_active_progress(progress_step);
+                    state = ACTIVE;
+                }
+                break;
+
+            case ACTIVE:
+                /*
+                   During active state, SW0 must remain high.
+                   If it goes low early, session is interrupted.
+                */
+				//this is checking if sw0 is still on 
+                if ((read_switches() & 0x1) == 0) {
+                    state = INTERRUPTED;
+                    break;
+                }
+
+				//this our progress interval
+                delay(STEP_DELAY);
+
+				//we check cuz user may turn off the switch during delay
+                /* Check again after delay in case user removed phone mid-step */
+                if ((read_switches() & 0x1) == 0) {
+                    state = INTERRUPTED;
+                    break;
+                }
+
+                progress_step++;
+
+				//if still within valid steps, update the display 
+                if (progress_step <= STEP_COUNT) {
+                    show_active_progress(progress_step);
+                }
+
+				//once it goes beyond 4, session is finished 
+                if (progress_step > STEP_COUNT) {
+                    state = COMPLETE;
+                }
+                break;
+
+            case COMPLETE:
+                flash_complete();
+
+                /*
+                   After complete, wait until SW0 is lowered
+                   before returning to idle
+                */
+                while (read_switches() & 0x1) {
+                    if (read_switches() & 0x2) break; /* reset escape */
+                }
+
+                state = IDLE;
+                progress_step = 0;
+                show_idle();
+                break;
+
+            case INTERRUPTED:
+                flash_interrupted();
+
+                /*
+                   After interrupt, wait until SW0 is lowered
+                   before returning to idle, sw0 basically clears the input
+				   so it can returnh to idle state 
+                */
+                while (read_switches() & 0x1) {
+                    if (read_switches() & 0x2) break; /* reset escape */
+                }
+
+                state = IDLE;
+                progress_step = 0;
+                show_idle();
+                break;
+
+				//if the state becomes invalid force everything to idle 
+            default:
+                state = IDLE;
+                progress_step = 0;
+                show_idle();
+                break;
+        }
+    }
+
+    return 0;
+}
